@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fiche en blocs</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2433; --muted: #6b7385;
+    --line: #dde1e8; --accent: #2f6f6a; --accent-soft: #e3f0ee; --ok: #2f7d4f;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #151a22; --panel: #1e2430; --ink: #e6e9ef; --muted: #98a1b3;
+      --line: #313a4a; --accent: #6fbfb7; --accent-soft: #203533; --ok: #6fcf97;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  body { padding: 12px 14px 40px; }
+
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+  .topbar h1 { font-size: 15px; margin: 0; font-weight: 600; color: var(--muted); }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--panel);
+    color: var(--ink); border-radius: 6px; padding: 5px 10px; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible
+    { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .bloc { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    margin-bottom: 12px; overflow: hidden; }
+  .bloc > summary { list-style: none; cursor: pointer; display: flex; align-items: center;
+    gap: 10px; padding: 11px 14px; font-weight: 600; font-size: 15px;
+    border-left: 4px solid var(--accent); }
+  .bloc > summary::-webkit-details-marker { display: none; }
+  .bloc > summary .chev { transition: transform .15s; color: var(--muted); }
+  .bloc[open] > summary .chev { transform: rotate(90deg); }
+  .bloc > summary .titre { flex: 1; }
+  .compteur { font-weight: 400; font-size: 12px; color: var(--muted); }
+  .compteur.complet { color: var(--ok); }
+  .barre { height: 3px; background: var(--line); }
+  .barre > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+
+  .questions { padding: 6px 14px 14px; display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .q { display: flex; flex-direction: column; gap: 4px; }
+  .q.large { grid-column: 1 / -1; }
+  .q label { font-size: 13px; font-weight: 500; }
+  .q.vide label::after { content: " •"; color: var(--accent); }
+  input[type=text], input[type=number], input[type=date], textarea {
+    width: 100%; font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; }
+  textarea { resize: vertical; min-height: 36px; }
+  input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
+
+  .vide-msg { text-align: center; color: var(--muted); padding: 40px 10px; }
+
+  /* configuration */
+  #config { display: none; }
+  body.config #config { display: block; }
+  body.config #fiche { display: none; }
+  .cfg-bloc { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 12px; margin-bottom: 12px; }
+  .cfg-head { display: flex; gap: 6px; margin-bottom: 8px; }
+  .cfg-head input { flex: 1; font-weight: 600; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 12px; }
+  .cols label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .cols label.pris { color: var(--muted); }
+  .aide { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1 id="nomTable">Fiche</h1>
+  <div>
+    <button id="btnConfig" type="button">Configurer les blocs</button>
+  </div>
+</div>
+
+<div id="fiche"><div class="vide-msg">Sélectionnez une ligne dans la table liée.</div></div>
+
+<div id="config">
+  <p class="aide">Créez vos blocs, donnez-leur un titre et cochez les colonnes (questions) à y placer.
+    Une colonne ne peut appartenir qu'à un seul bloc. Les colonnes non classées apparaissent dans « Autres ».</p>
+  <div id="cfgBlocs"></div>
+  <button id="addBloc" type="button">+ Ajouter un bloc</button>
+  <button id="saveCfg" type="button" class="primary">Enregistrer</button>
+</div>
+
+<script>
+(function () {
+  let blocs = [];          // [{titre, colonnes:[...]}]
+  let record = null;       // ligne courante
+  let colonnes = [];       // noms de toutes les colonnes (hors id)
+  let editionCfg = false;
+
+  const $ = (s) => document.querySelector(s);
+  const ouverts = new Set(); // titres des blocs ouverts (conservé entre lignes)
+
+  grist.ready({ requiredAccess: 'full', allowSelectBy: false });
+
+  grist.onOptions((opts) => {
+    blocs = (opts && opts.blocs) || [];
+    if (!editionCfg) render();
+  });
+
+  grist.onRecord((rec) => {
+    record = rec;
+    if (rec) {
+      colonnes = Object.keys(rec).filter((k) => k !== 'id' && !k.startsWith('gristHelper_'));
+    }
+    if (!editionCfg) render();
+  });
+
+  // ---------- Rendu de la fiche ----------
+  function estVide(v) {
+    return v === null || v === undefined || v === '' || v === false ||
+      (Array.isArray(v) && v.length <= 1);
+  }
+
+  function blocsEffectifs() {
+    const utilisees = new Set();
+    const res = blocs.map((b) => {
+      const cols = b.colonnes.filter((c) => colonnes.includes(c));
+      cols.forEach((c) => utilisees.add(c));
+      return { titre: b.titre, colonnes: cols };
+    });
+    const reste = colonnes.filter((c) => !utilisees.has(c));
+    if (reste.length) res.push({ titre: 'Autres', colonnes: reste });
+    return res.filter((b) => b.colonnes.length);
+  }
+
+  function champ(col, val) {
+    const wrap = document.createElement('div');
+    wrap.className = 'q' + (estVide(val) ? ' vide' : '');
+    const id = 'f_' + col;
+    const lab = document.createElement('label');
+    lab.htmlFor = id;
+    lab.textContent = col.replace(/_/g, ' ');
+    wrap.appendChild(lab);
+
+    let el;
+    if (typeof val === 'boolean') {
+      el = document.createElement('input'); el.type = 'checkbox'; el.checked = val;
+      el.onchange = () => sauver(col, el.checked);
+    } else if (typeof val === 'number') {
+      el = document.createElement('input'); el.type = 'number'; el.step = 'any'; el.value = val;
+      el.onchange = () => sauver(col, el.value === '' ? null : Number(el.value));
+    } else if (Array.isArray(val)) {
+      el = document.createElement('input'); el.type = 'text'; el.readOnly = true;
+      el.value = val.slice(1).join(', ');
+      el.title = 'Colonne à choix multiples : modifiable dans la vue Grist';
+    } else if (val instanceof Date) {
+      el = document.createElement('input'); el.type = 'text'; el.readOnly = true;
+      el.value = val.toLocaleDateString('fr-FR');
+    } else if (val !== null && typeof val === 'object') {
+      el = document.createElement('input'); el.type = 'text'; el.readOnly = true;
+      el.value = String(val.details || val.display || '');
+    } else {
+      const long = typeof val === 'string' && (val.length > 70 || val.includes('\n'));
+      el = document.createElement(long || val == null ? 'textarea' : 'input');
+      if (el.tagName === 'INPUT') el.type = 'text';
+      else { el.rows = long ? 3 : 1; wrap.classList.toggle('large', long); }
+      el.value = val == null ? '' : val;
+      el.onchange = () => sauver(col, el.value);
+    }
+    el.id = id;
+    wrap.appendChild(el);
+    return wrap;
+  }
+
+  function sauver(col, valeur) {
+    if (!record) return;
+    grist.selectedTable.update({ id: record.id, fields: { [col]: valeur } });
+  }
+
+  function render() {
+    const zone = $('#fiche');
+    zone.innerHTML = '';
+    if (!record) {
+      zone.innerHTML = '<div class="vide-msg">Sélectionnez une ligne dans la table liée.</div>';
+      return;
+    }
+    const liste = blocsEffectifs();
+    if (!liste.length) {
+      zone.innerHTML = '<div class="vide-msg">Aucun bloc défini. Cliquez sur « Configurer les blocs ».</div>';
+      return;
+    }
+    liste.forEach((b, i) => {
+      const det = document.createElement('details');
+      det.className = 'bloc';
+      det.open = ouverts.size === 0 ? i === 0 : ouverts.has(b.titre);
+      det.addEventListener('toggle', () => {
+        if (det.open) ouverts.add(b.titre); else ouverts.delete(b.titre);
+      });
+
+      const total = b.colonnes.length;
+      const remplis = b.colonnes.filter((c) => !estVide(record[c])).length;
+
+      const sum = document.createElement('summary');
+      sum.innerHTML = '<span class="chev">▸</span><span class="titre"></span><span class="compteur"></span>';
+      sum.querySelector('.titre').textContent = b.titre;
+      const cpt = sum.querySelector('.compteur');
+      cpt.textContent = remplis + ' / ' + total + ' remplies';
+      if (remplis === total) cpt.classList.add('complet');
+      det.appendChild(sum);
+
+      const barre = document.createElement('div');
+      barre.className = 'barre';
+      barre.innerHTML = '<i style="width:' + Math.round((remplis / total) * 100) + '%"></i>';
+      det.appendChild(barre);
+
+      const qs = document.createElement('div');
+      qs.className = 'questions';
+      b.colonnes.forEach((c) => qs.appendChild(champ(c, record[c])));
+      det.appendChild(qs);
+      zone.appendChild(det);
+    });
+  }
+
+  // ---------- Configuration ----------
+  function ouvrirConfig() {
+    editionCfg = true;
+    document.body.classList.add('config');
+    $('#btnConfig').textContent = 'Annuler';
+    dessinerConfig();
+  }
+  function fermerConfig() {
+    editionCfg = false;
+    document.body.classList.remove('config');
+    $('#btnConfig').textContent = 'Configurer les blocs';
+    render();
+  }
+
+  function dessinerConfig() {
+    const zone = $('#cfgBlocs');
+    zone.innerHTML = '';
+    blocs.forEach((b, i) => {
+      const box = document.createElement('div');
+      box.className = 'cfg-bloc';
+
+      const head = document.createElement('div');
+      head.className = 'cfg-head';
+      const t = document.createElement('input');
+      t.type = 'text'; t.value = b.titre; t.placeholder = 'Titre du bloc';
+      t.oninput = () => { b.titre = t.value; };
+      head.appendChild(t);
+      [['↑', -1], ['↓', 1]].forEach(([txt, d]) => {
+        const bt = document.createElement('button');
+        bt.type = 'button'; bt.textContent = txt; bt.title = 'Déplacer';
+        bt.onclick = () => {
+          const j = i + d;
+          if (j < 0 || j >= blocs.length) return;
+          [blocs[i], blocs[j]] = [blocs[j], blocs[i]];
+          dessinerConfig();
+        };
+        head.appendChild(bt);
+      });
+      const del = document.createElement('button');
+      del.type = 'button'; del.textContent = 'Supprimer';
+      del.onclick = () => { blocs.splice(i, 1); dessinerConfig(); };
+      head.appendChild(del);
+      box.appendChild(head);
+
+      const grille = document.createElement('div');
+      grille.className = 'cols';
+      colonnes.forEach((c) => {
+        const ailleurs = blocs.some((o, k) => k !== i && o.colonnes.includes(c));
+        const lab = document.createElement('label');
+        if (ailleurs) lab.className = 'pris';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.checked = b.colonnes.includes(c); cb.disabled = ailleurs;
+        cb.onchange = () => {
+          if (cb.checked) b.colonnes.push(c);
+          else b.colonnes = b.colonnes.filter((x) => x !== c);
+        };
+        lab.appendChild(cb);
+        lab.appendChild(document.createTextNode(c));
+        grille.appendChild(lab);
+      });
+      box.appendChild(grille);
+      zone.appendChild(box);
+    });
+  }
+
+  $('#btnConfig').onclick = () => (editionCfg ? fermerConfig() : ouvrirConfig());
+  $('#addBloc').onclick = () => {
+    blocs.push({ titre: 'Bloc ' + (blocs.length + 1), colonnes: [] });
+    dessinerConfig();
+  };
+  $('#saveCfg').onclick = async () => {
+    blocs = blocs.filter((b) => b.titre.trim() || b.colonnes.length);
+    await grist.setOptions({ blocs });
+    fermerConfig();
+  };
+})();
+</script>
+</body>
+</html>
